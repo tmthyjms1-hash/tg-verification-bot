@@ -33,8 +33,7 @@ def send_welcome(message):
     intro_text = (
         "Welcome to the **WXC Verification Bot**! 🚀\n\n"
         "To get access to our WXC Exlusive TG Channel, "
-        "please provide proof that you are registered under our official promo codes:\n\n"
-        "**1XDOTAPH - ALOWXC - JUSTML - FOCUSFIRE**\n\n"
+        "please provide proof that you are registered under our official promo code.\n\n"
         "👉 **Please reply by typing your Betting Account ID.**\n\n"
         "⚠️ *Note: You can only submit your details ONCE. Make sure your info is correct.*"
     )
