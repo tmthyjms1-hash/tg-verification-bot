@@ -70,7 +70,6 @@ def admin_action(call):
     target_user_id = int(target_user_id)
 
     if action == "approve":
-        # FIX: Removed parse_mode='Markdown' here to prevent URL special characters from breaking the bot
         success_msg = f"🎉 Verification Successful!\n\nWelcome to the team. Click the link below to join the VIP Channel instantly:\n\n{VIP_LINK}"
         try:
             bot.send_message(target_user_id, success_msg)
@@ -79,9 +78,18 @@ def admin_action(call):
             bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error approving {target_user_id}: {str(e)}")
 
     elif action == "reject":
-        fail_msg = "❌ Verification Failed.\n\nYour Betting ID was not found under our promo code tree. Please ensure you typed it correctly or re-register under our link."
+        fail_msg = (
+            "❌ **Verification Failed.**\n\n"
+            "Your Betting ID was not found under our promo code tree. "
+            "Please ensure you typed it correctly or re-register under our link.\n\n"
+            "🔄 **You can now type and send your corrected Betting Account ID right here to try again.**"
+        )
         try:
-            bot.send_message(target_user_id, fail_msg)
+            # FIX: Remove the user from the locked list so they can type their ID again
+            if target_user_id in submitted_users:
+                submitted_users.remove(target_user_id)
+                
+            bot.send_message(target_user_id, fail_msg, parse_mode='Markdown')
             bot.edit_message_text(f"❌ Rejected by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error rejecting {target_user_id}: {str(e)}")
