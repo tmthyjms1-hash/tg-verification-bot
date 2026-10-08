@@ -78,18 +78,21 @@ def admin_action(call):
             bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error approving {target_user_id}: {str(e)}")
 
     elif action == "reject":
+        # Updated rejection message layout with registration link and promo code
         fail_msg = (
             "❌ **Verification Failed.**\n\n"
-            "Your Betting ID was not found under our promo code tree. "
-            "Please ensure you typed it correctly or re-register under our link.\n\n"
-            "🔄 **You can now type and send your corrected Betting Account ID right here to try again.**"
+            "Your Betting ID was not found under our promo code tree. Please ensure you typed it correctly or re-register under our link.\n\n"
+            "🔄 **You can now type and send your corrected Betting Account ID right here to try again.**\n\n"
+            "If you don't have an account under our promocode you can register by clicking this link:\n"
+            "🔗 **Registration Link:** https://esportslinks.one/1xdotaph/\n"
+            "🏷 **PROMOCODE:** 1XDOTAPH"
         )
         try:
-            # FIX: Remove the user from the locked list so they can type their ID again
+            # Remove the user from the locked list so they can retry immediately
             if target_user_id in submitted_users:
                 submitted_users.remove(target_user_id)
                 
-            bot.send_message(target_user_id, fail_msg, parse_mode='Markdown')
+            bot.send_message(target_user_id, fail_msg, parse_mode='Markdown', disable_web_page_preview=True)
             bot.edit_message_text(f"❌ Rejected by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error rejecting {target_user_id}: {str(e)}")
