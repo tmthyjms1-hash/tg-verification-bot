@@ -2,24 +2,27 @@ import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Load secure keys from hosting environment
+# Fix for Render's Web Service port-binding scanner
+os.system("python3 -m http.server 10000 &")
+
+# Load secure keys from hosting environment variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_GROUP_ID = int(os.environ.get('ADMIN_GROUP_ID'))
 VIP_LINK = os.environ.get('VIP_LINK')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Simple temporary dictionary to prevent double submissions while bot runs
+# Simple temporary set to prevent double submissions while the bot runs
 submitted_users = set()
 
 # 1. Welcome Intro Message
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     intro_text = (
-        "Welcome to the **VIP Verification Bot**! 🚀\n\n"
-        "To get instant, free access to our Premium VIP Betting Channel, "
+        "Welcome to the **WXC Verification Bot**! 🚀\n\n"
+        "To get access to our WXC Exlusive TG Channel, "
         "please provide proof that you are registered under our official promo code.\n\n"
-        "👉 **Please reply by typing your Betting Account ID or sending a screenshot of your profile.**\n\n"
+        "👉 **Please reply by typing your Betting Account ID.**\n\n"
         "⚠️ *Note: You can only submit your details ONCE. Make sure your info is correct.*"
     )
     bot.send_message(message.chat.id, intro_text, parse_mode='Markdown')
@@ -62,7 +65,7 @@ def admin_action(call):
     target_user_id = int(target_user_id)
 
     if action == "approve":
-        success_msg = f"🎉 **Verification Successful!**\n\nWelcome to the team. Click the link below to join the VIP Channel instantly:\n{VIP_LINK}"
+        success_msg = f"🎉 **Verification Successful!**\n\nWelcome to the team. Click the link below to join the Channel instantly:\n{VIP_LINK}"
         try:
             bot.send_message(target_user_id, success_msg, parse_mode='Markdown')
             bot.edit_message_text(f"✅ Approved by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
