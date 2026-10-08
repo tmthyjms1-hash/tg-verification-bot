@@ -81,7 +81,7 @@ def admin_action(call):
         fail_msg = (
             "❌ **Verification Failed.**\n\n"
             "Your Betting ID was not found under our promo code tree. Please ensure you typed it correctly or re-register under our link.\n\n"
-            "🔄 **You can now type and send your corrected Betting Account ID right here to try again.**\n\n"
+            "🔄 **You can now type and send your correct Betting Account ID right here to try again.**\n\n"
             "If you don't have an account under our promocode you can register by clicking this link:\n"
             "🔗 **Registration Link:** https://esportslinks.one/1xdotaph/\n"
             "🏷 **PROMOCODE:** 1XDOTAPH"
