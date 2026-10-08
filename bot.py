@@ -4,7 +4,7 @@ import telebot
 from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# 1. Setup a proper web server to satisfy Render's port binding
+# 1. Setup web server to satisfy Render's port binding
 app = Flask('')
 
 @app.route('/')
@@ -12,16 +12,14 @@ def home():
     return "Bot is alive!"
 
 def run_web_server():
-    # Render automatically injects the PORT environment variable
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Start the web server in a separate background thread
 server_thread = threading.Thread(target=run_web_server)
 server_thread.daemon = True
 server_thread.start()
 
-# 2. Initialize your Telegram Bot
+# 2. Initialize Telegram Bot
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_GROUP_ID = int(os.environ.get('ADMIN_GROUP_ID'))
 VIP_LINK = os.environ.get('VIP_LINK')
@@ -29,12 +27,14 @@ VIP_LINK = os.environ.get('VIP_LINK')
 bot = telebot.TeleBot(BOT_TOKEN)
 submitted_users = set()
 
+# Welcome Message with your explicit text and promo codes
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     intro_text = (
         "Welcome to the **WXC Verification Bot**! 🚀\n\n"
         "To get access to our WXC Exlusive TG Channel, "
-        "please provide proof that you are registered under our official promo code.\n\n"
+        "please provide proof that you are registered under our official promo codes:\n\n"
+        "**1XDOTAPH - ALOWXC - JUSTML - FOCUSFIRE**\n\n"
         "👉 **Please reply by typing your Betting Account ID.**\n\n"
         "⚠️ *Note: You can only submit your details ONCE. Make sure your info is correct.*"
     )
@@ -64,6 +64,8 @@ def handle_submission(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def admin_action(call):
+    bot.answer_callback_query(call.id)
+    
     action, target_user_id = call.data.split("_")
     target_user_id = int(target_user_id)
 
@@ -72,15 +74,15 @@ def admin_action(call):
         try:
             bot.send_message(target_user_id, success_msg, parse_mode='Markdown')
             bot.edit_message_text(f"✅ Approved by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
-        except Exception:
-            bot.edit_message_text("⚠️ User blocked the bot, couldn't send link.", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error approving {target_user_id}: {str(e)}")
 
     elif action == "reject":
         fail_msg = "❌ **Verification Failed.**\n\nYour Betting ID was not found under our promo code tree. Please ensure you typed it correctly or re-register under our link."
         try:
             bot.send_message(target_user_id, fail_msg, parse_mode='Markdown')
             bot.edit_message_text(f"❌ Rejected by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
-        except Exception:
-            bot.edit_message_text("⚠️ User blocked the bot.", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error rejecting {target_user_id}: {str(e)}")
 
 bot.infinity_polling()
