@@ -27,7 +27,7 @@ VIP_LINK = os.environ.get('VIP_LINK')
 bot = telebot.TeleBot(BOT_TOKEN)
 submitted_users = set()
 
-# Welcome Message with perfectly closed quotes and formatting
+# Welcome Message with your explicit text and promo codes
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     intro_text = (
@@ -70,17 +70,18 @@ def admin_action(call):
     target_user_id = int(target_user_id)
 
     if action == "approve":
-        success_msg = f"🎉 **Verification Successful!**\n\nWelcome to the team. Click the link below to join the VIP Channel instantly:\n{VIP_LINK}"
+        # FIX: Removed parse_mode='Markdown' here to prevent URL special characters from breaking the bot
+        success_msg = f"🎉 Verification Successful!\n\nWelcome to the team. Click the link below to join the VIP Channel instantly:\n\n{VIP_LINK}"
         try:
-            bot.send_message(target_user_id, success_msg, parse_mode='Markdown')
+            bot.send_message(target_user_id, success_msg)
             bot.edit_message_text(f"✅ Approved by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error approving {target_user_id}: {str(e)}")
 
     elif action == "reject":
-        fail_msg = "❌ **Verification Failed.**\n\nYour Betting ID was not found under our promo code tree. Please ensure you typed it correctly or re-register under our link."
+        fail_msg = "❌ Verification Failed.\n\nYour Betting ID was not found under our promo code tree. Please ensure you typed it correctly or re-register under our link."
         try:
-            bot.send_message(target_user_id, fail_msg, parse_mode='Markdown')
+            bot.send_message(target_user_id, fail_msg)
             bot.edit_message_text(f"❌ Rejected by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.send_message(ADMIN_GROUP_ID, f"⚠️ Error rejecting {target_user_id}: {str(e)}")
