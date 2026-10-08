@@ -27,7 +27,7 @@ VIP_LINK = os.environ.get('VIP_LINK')
 bot = telebot.TeleBot(BOT_TOKEN)
 submitted_users = set()
 
-# Welcome Message with your explicit text and promo codes
+# Welcome Message with perfectly closed quotes and formatting
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     intro_text = (
