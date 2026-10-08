@@ -1,21 +1,34 @@
 import os
+import threading
 import telebot
+from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Fix for Render's Web Service port-binding scanner
-os.system("python3 -m http.server 10000 &")
+# 1. Setup a proper web server to satisfy Render's port binding
+app = Flask('')
 
-# Load secure keys from hosting environment variables
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web_server():
+    # Render automatically injects the PORT environment variable
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# Start the web server in a separate background thread
+server_thread = threading.Thread(target=run_web_server)
+server_thread.daemon = True
+server_thread.start()
+
+# 2. Initialize your Telegram Bot
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_GROUP_ID = int(os.environ.get('ADMIN_GROUP_ID'))
 VIP_LINK = os.environ.get('VIP_LINK')
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
-# Simple temporary set to prevent double submissions while the bot runs
 submitted_users = set()
 
-# 1. Welcome Intro Message
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     intro_text = (
@@ -27,45 +40,35 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, intro_text, parse_mode='Markdown')
 
-# 2. Capture Text or Screenshot & Forward to Admins
 @bot.message_handler(content_types=['text', 'photo'])
 def handle_submission(message):
     user_id = message.from_user.id
     username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
 
-    # Check if user already submitted
     if user_id in submitted_users:
         bot.reply_to(message, "❌ You have already submitted your request. Please wait for an admin to review it.")
         return
 
-    # Create Approve/Reject buttons for the admin chat
     markup = InlineKeyboardMarkup()
     markup.row(
         InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}"),
         InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
     )
 
-    # Inform the Admin Group
     bot.send_message(ADMIN_GROUP_ID, f"📩 **New Submission from {username} (ID: {user_id}):**")
-    
-    # Forward the content directly so admins see the text or image
     bot.forward_message(ADMIN_GROUP_ID, message.chat.id, message.message_id)
-    
-    # Send the action buttons right below the forwarded message
     bot.send_message(ADMIN_GROUP_ID, "Action required:", reply_markup=markup)
 
-    # Lock the user out from sending more messages
     submitted_users.add(user_id)
     bot.reply_to(message, "✅ Thank you! Your ID has been sent to our team. You will be notified here once verified.")
 
-# 3. Handle Admin Button Clicks (Approve / Reject)
 @bot.callback_query_handler(func=lambda call: True)
 def admin_action(call):
     action, target_user_id = call.data.split("_")
     target_user_id = int(target_user_id)
 
     if action == "approve":
-        success_msg = f"🎉 **Verification Successful!**\n\nWelcome to the team. Click the link below to join the Channel instantly:\n{VIP_LINK}"
+        success_msg = f"🎉 **Verification Successful!**\n\nWelcome to the team. Click the link below to join the VIP Channel instantly:\n{VIP_LINK}"
         try:
             bot.send_message(target_user_id, success_msg, parse_mode='Markdown')
             bot.edit_message_text(f"✅ Approved by {call.from_user.first_name}", call.message.chat.id, call.message.message_id)
@@ -80,5 +83,4 @@ def admin_action(call):
         except Exception:
             bot.edit_message_text("⚠️ User blocked the bot.", call.message.chat.id, call.message.message_id)
 
-# Keep bot running
 bot.infinity_polling()
