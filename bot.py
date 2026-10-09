@@ -1,4 +1,3 @@
-```python
 import os
 import threading
 import logging
@@ -300,4 +299,3 @@ if __name__ == "__main__":
         timeout=30,
         long_polling_timeout=30
     )
-```
