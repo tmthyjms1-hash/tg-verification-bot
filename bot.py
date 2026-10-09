@@ -93,7 +93,6 @@ def start(message):
         parse_mode="HTML",
         reply_markup=markup
     )
-    )
     
 
 # -----------------------------
