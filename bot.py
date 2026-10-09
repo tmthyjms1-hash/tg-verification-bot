@@ -89,7 +89,7 @@ def start(message):
         "To get access to our exclusive channel, please provide your 1XBET account ID \n"
         "to ensure you are registered under our official promo codes: \n"
         "<b><i> 1XDOTAPH - JUSTML - FOCUSFIRE - ALOWXC </i></b> \n\n"
-        "Our team will check your ID against our system and send your invite link as soon as you are verified!"
+        "Our team will check your ID against our system and send your invite link as soon as you are verified!",
         parse_mode="HTML",
         reply_markup=markup
     )
