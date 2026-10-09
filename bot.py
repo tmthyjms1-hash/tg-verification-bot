@@ -134,9 +134,13 @@ def begin_verification(call):
 
     bot.send_message(
         call.message.chat.id,
-        "📝 Please send your Betting Account ID or "
-        "the required verification proof here.\n\n"
-        "You can send it as text or a photo."
+        "📝 Please type your 1X Account ID. \n\n"
+        "How to find your 1X Account ID? \n"
+        "1. Log-in your account. \n" 
+        "2. Tap your <b> Profile/Account Icon </b> \n"
+        "3. Look for your <b> Account Number </b> in your profile details. \n"
+        "4. Copy your ID and send it here for verification. \n\n"
+        " ⚠️ <b> PLEASE SEND YOUR ACCOUNT ID ONLY. Never share your <b> Password or OTP </b>."
     )
 
 # -----------------------------
