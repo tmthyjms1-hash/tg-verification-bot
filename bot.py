@@ -1,20 +1,36 @@
 import os
 import threading
 import logging
+
 import telebot
-from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from flask import Flask
 
-# ==========================================
-# 1. LOGGING
-# ==========================================
-
+# -----------------------------
+# LOGGING
+# -----------------------------
 logging.basicConfig(level=logging.INFO)
 
-# ==========================================
-# 2. FLASK SERVER FOR RENDER
-# ==========================================
+# -----------------------------
+# ENVIRONMENT VARIABLES
+# -----------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_GROUP_ID = os.environ.get("ADMIN_GROUP_ID")
+VIP_LINK = os.environ.get("VIP_LINK")
 
+if not BOT_TOKEN or not ADMIN_GROUP_ID or not VIP_LINK:
+    raise ValueError(
+        "Missing environment variables: "
+        "BOT_TOKEN, ADMIN_GROUP_ID, or VIP_LINK"
+    )
+
+ADMIN_GROUP_ID = int(ADMIN_GROUP_ID)
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# -----------------------------
+# FLASK SERVER FOR RENDER
+# -----------------------------
 app = Flask(__name__)
 
 
@@ -28,93 +44,145 @@ def run_web_server():
     app.run(host="0.0.0.0", port=port)
 
 
-server_thread = threading.Thread(target=run_web_server, daemon=True)
-server_thread.start()
+threading.Thread(target=run_web_server, daemon=True).start()
 
-# ==========================================
-# 3. BOT CONFIGURATION
-# ==========================================
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_GROUP_ID = os.environ.get("ADMIN_GROUP_ID")
-VIP_LINK = os.environ.get("VIP_LINK")
-
-if not BOT_TOKEN or not ADMIN_GROUP_ID or not VIP_LINK:
-    raise ValueError(
-        "Missing BOT_TOKEN, ADMIN_GROUP_ID, or VIP_LINK environment variable."
-    )
-
-ADMIN_GROUP_ID = int(ADMIN_GROUP_ID)
-
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# Temporary tracking; resets when the bot restarts
+# -----------------------------
+# TEMPORARY USER TRACKING
+# Note: These sets reset when the
+# service restarts.
+# -----------------------------
 submitted_users = set()
 verified_users = set()
 
-# ==========================================
-# 4. WELCOME MESSAGE
-# ==========================================
+# -----------------------------
+# RE-REGISTRATION DETAILS
+# -----------------------------
+REREGISTRATION_LINK = "https://esportslinks.one/1xdotaph/"
+PROMO_CODE = "1XDOTAPH"
 
+# -----------------------------
+# /START COMMAND
+# -----------------------------
 @bot.message_handler(commands=["start"], chat_types=["private"])
-def send_welcome(message):
+def start(message):
     user_id = message.from_user.id
 
     if user_id in verified_users:
         bot.send_message(
             message.chat.id,
-            "✅ You have already been verified. No further submissions are allowed."
+            "✅ You are already verified!"
         )
         return
 
-    intro_text = (
-        "Welcome to the *WXC Verification Bot*! 🚀\n\n"
-        "To get access to our WXC Exclusive TG Channel, "
-        "please provide proof that you are registered under our official promo code.\n\n"
-        "👉 *Please send your Betting Account ID.*\n\n"
-        "⚠️ _You can only submit your details once. "
-        "Make sure your information is correct._"
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton(
+            "🚀 Start Verification",
+            callback_data=f"begin_{user_id}"
+        )
     )
 
     bot.send_message(
         message.chat.id,
-        intro_text,
-        parse_mode="Markdown"
+        "👋 Welcome!\n\n"
+        "Ready to get verified?\n"
+        "Press the button below to begin.\n\n"
+        "Please prepare your Betting Account ID or "
+        "the required verification proof.",
+        reply_markup=markup
     )
 
-# ==========================================
-# 5. HANDLE PRIVATE SUBMISSIONS ONLY
-# ==========================================
+# -----------------------------
+# START VERIFICATION BUTTON
+# -----------------------------
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("begin_")
+)
+def begin_verification(call):
+    user_id = call.from_user.id
 
+    # Only the user who received the button can use it.
+    if user_id != int(call.data.split("_", 1)[1]):
+        bot.answer_callback_query(
+            call.id,
+            "This button belongs to another user.",
+            show_alert=True
+        )
+        return
+
+    if user_id in verified_users:
+        bot.answer_callback_query(
+            call.id,
+            "You are already verified!",
+            show_alert=True
+        )
+        return
+
+    if user_id in submitted_users:
+        bot.answer_callback_query(
+            call.id,
+            "Your submission is already being processed.",
+            show_alert=True
+        )
+        return
+
+    bot.answer_callback_query(call.id)
+
+    bot.send_message(
+        call.message.chat.id,
+        "📝 Please send your Betting Account ID or "
+        "the required verification proof here.\n\n"
+        "You can send it as text or a photo."
+    )
+
+# -----------------------------
+# HANDLE USER SUBMISSIONS
+# Private chats only.
+# -----------------------------
 @bot.message_handler(
     content_types=["text", "photo"],
     chat_types=["private"]
 )
 def handle_submission(message):
     user_id = message.from_user.id
+    chat_id = message.chat.id
 
-    # Block users who have already been verified
+    # Ignore commands handled elsewhere.
+    if message.content_type == "text" and message.text.startswith("/"):
+        return
+
     if user_id in verified_users:
-        bot.reply_to(
-            message,
-            "✅ You have already been verified. You cannot submit another request."
+        bot.send_message(
+            chat_id,
+            "✅ You are already verified. "
+            "You don't need to submit again."
+        )
+        return
+
+    if user_id in submitted_users:
+        bot.send_message(
+            chat_id,
+            "⏳ Your submission is already being processed. "
+            "Please wait for the Admin team's decision."
         )
         return
 
     username = (
         f"@{message.from_user.username}"
         if message.from_user.username
-        else "No Username"
+        else "No username set"
     )
 
-    # Prevent multiple submissions while awaiting review
-    if user_id in submitted_users:
-        bot.reply_to(
-            message,
-            "❌ You have already submitted your request. "
-            "Please wait for an admin to review it."
-        )
-        return
+    full_name = message.from_user.full_name or "Unknown"
+
+    admin_text = (
+        "📩 NEW VERIFICATION SUBMISSION\n\n"
+        f"👤 Name: {full_name}\n"
+        f"🔹 Username: {username}\n"
+        f"🆔 Telegram ID: {user_id}\n"
+        f"💬 Chat ID: {chat_id}\n\n"
+        "Review the user's submission below."
+    )
 
     markup = InlineKeyboardMarkup()
     markup.row(
@@ -129,170 +197,153 @@ def handle_submission(message):
     )
 
     try:
-        # Send applicant details to the Admin group
+        # Send applicant details to the Admin GC.
         bot.send_message(
             ADMIN_GROUP_ID,
-            f"📩 New Verification Submission\n\n"
-            f"Username: {username}\n"
-            f"Telegram User ID: {user_id}"
+            admin_text
         )
 
-        # Forward the user's submitted text or photo
+        # Forward the original submission to the Admin GC.
         bot.forward_message(
             ADMIN_GROUP_ID,
-            message.chat.id,
+            chat_id,
             message.message_id
         )
 
-        # Send admin action buttons
+        # Send the approval/rejection buttons.
         bot.send_message(
             ADMIN_GROUP_ID,
-            "Action required:",
+            f"Admin decision for Telegram ID: {user_id}",
             reply_markup=markup
         )
 
+        # Mark submitted only after the admin messages succeed.
         submitted_users.add(user_id)
 
-        bot.reply_to(
-            message,
-            "✅ Thank you! Your ID has been sent to our team. "
-            "You will be notified here once verified."
+        bot.send_message(
+            chat_id,
+            "✅ Your submission has been sent to the Admin team.\n\n"
+            "Please wait while your verification is reviewed."
         )
 
-    except Exception:
-        logging.exception(
-            "Failed to forward submission from user %s",
-            user_id
-        )
+    except Exception as e:
+        logging.exception("Failed to process submission for %s", user_id)
 
-        bot.reply_to(
-            message,
-            "⚠️ We couldn't send your submission to the team. "
+        bot.send_message(
+            chat_id,
+            "⚠️ We couldn't send your submission to the Admin team. "
             "Please try again later."
         )
 
-# ==========================================
-# 6. HANDLE APPROVE / REJECT BUTTONS
-# ==========================================
-
+# -----------------------------
+# APPROVE / REJECT BUTTONS
+# -----------------------------
 @bot.callback_query_handler(
     func=lambda call: (
-        call.data is not None
-        and (
-            call.data.startswith("approve_")
-            or call.data.startswith("reject_")
-        )
+        call.data.startswith("approve_")
+        or call.data.startswith("reject_")
     )
 )
-def admin_action(call):
+def handle_admin_decision(call):
     try:
-        action, target_user_id = call.data.split("_", 1)
-        target_user_id = int(target_user_id)
+        action, target_user_id_text = call.data.split("_", 1)
+        target_user_id = int(target_user_id_text)
     except (ValueError, AttributeError):
-        bot.answer_callback_query(call.id, "Invalid action.")
+        bot.answer_callback_query(
+            call.id,
+            "Invalid action.",
+            show_alert=True
+        )
+        return
+
+    # Answer each callback only once.
+    if target_user_id in verified_users:
+        bot.answer_callback_query(
+            call.id,
+            "This user is already verified.",
+            show_alert=True
+        )
+        return
+
+    if target_user_id not in submitted_users:
+        bot.answer_callback_query(
+            call.id,
+            "This submission is no longer pending.",
+            show_alert=True
+        )
         return
 
     bot.answer_callback_query(call.id)
 
-    # ======================================
-    # APPROVE USER
-    # ======================================
-
     if action == "approve":
-        # Prevent repeat processing of approved users
-        if target_user_id in verified_users:
-            bot.answer_callback_query(
-                call.id,
-                "This user has already been verified.",
-                show_alert=True
-            )
-            return
-
-        success_msg = (
-            "🎉 *Verification Successful!*\n\n"
-            "Welcome to the team! Click the link below to join "
-            "the VIP Channel:\n\n"
-            f"{VIP_LINK}"
-        )
-
         try:
             bot.send_message(
                 target_user_id,
-                success_msg,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
+                "🎉 Congratulations! Your verification has been approved.\n\n"
+                f"🔗 Here is your VIP link:\n{VIP_LINK}"
             )
 
-            # Mark user as verified and permanently locked for this run
             verified_users.add(target_user_id)
-            submitted_users.add(target_user_id)
-
-            bot.edit_message_text(
-                f"✅ Approved by {call.from_user.first_name}",
-                call.message.chat.id,
-                call.message.message_id
-            )
-
-        except Exception:
-            logging.exception(
-                "Approval notification failed for user %s",
-                target_user_id
-            )
-
-            bot.send_message(
-                ADMIN_GROUP_ID,
-                f"⚠️ Could not notify user {target_user_id}. "
-                "They may need to start the bot first."
-            )
-
-    # ======================================
-    # REJECT USER
-    # ======================================
-
-    elif action == "reject":
-        fail_msg = (
-            "❌ *Verification Failed.*\n\n"
-            "Your Betting ID was not found under our promo code tree. "
-            "Please check that you typed it correctly or register again.\n\n"
-            "🔄 Send your correct Betting Account ID here to try again.\n\n"
-            "🔗 *Registration Link:* https://esportslinks.one/1xdotaph/\n"
-            "🏷 *PROMOCODE:* `1XDOTAPH`"
-        )
-
-        try:
-            bot.send_message(
-                target_user_id,
-                fail_msg,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-
-            # Allow rejected users to submit again
             submitted_users.discard(target_user_id)
 
             bot.edit_message_text(
-                f"❌ Rejected by {call.from_user.first_name}",
+                f"✅ APPROVED\nTelegram ID: {target_user_id}",
                 call.message.chat.id,
-                call.message.message_id
+                call.message.message_id,
+                reply_markup=InlineKeyboardMarkup()
             )
 
-        except Exception:
+        except Exception as e:
             logging.exception(
-                "Rejection notification failed for user %s",
+                "Failed to notify approved user %s",
                 target_user_id
             )
 
             bot.send_message(
                 ADMIN_GROUP_ID,
-                f"⚠️ Could not notify user {target_user_id}."
+                "⚠️ Could not notify user "
+                f"{target_user_id}.\n"
+                f"Error: {str(e)}\n\n"
+                "They may need to open the bot and press Start."
             )
 
-# ==========================================
-# 7. START BOT
-# ==========================================
+    elif action == "reject":
+        try:
+            bot.send_message(
+                target_user_id,
+                "❌ Unfortunately, your verification was rejected.\n\n"
+                "You may register again using the link below.\n\n"
+                f"🔗 Re-registration link: {REREGISTRATION_LINK}\n"
+                f"🎟 Promo code: {PROMO_CODE}"
+            )
 
+            submitted_users.discard(target_user_id)
+
+            bot.edit_message_text(
+                f"❌ REJECTED\nTelegram ID: {target_user_id}",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=InlineKeyboardMarkup()
+            )
+
+        except Exception as e:
+            logging.exception(
+                "Failed to notify rejected user %s",
+                target_user_id
+            )
+
+            bot.send_message(
+                ADMIN_GROUP_ID,
+                "⚠️ Could not notify rejected user "
+                f"{target_user_id}.\n"
+                f"Error: {str(e)}"
+            )
+
+# -----------------------------
+# RUN BOT
+# -----------------------------
 if __name__ == "__main__":
-    logging.info("WXC Verification Bot is starting...")
+    logging.info("Starting Telegram bot...")
 
     bot.infinity_polling(
         skip_pending=True,
