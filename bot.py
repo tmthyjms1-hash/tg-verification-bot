@@ -1,27 +1,27 @@
-
 import os
 import re
 import json
 import time
+import html
 import sqlite3
 import logging
 import threading
 
 import telebot
 import gspread
+
 from flask import Flask, jsonify
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from google.oauth2.service_account import Credentials
 
 
-# --------------------------------------------------
+# ============================================================
 # CONFIGURATION
-# --------------------------------------------------
+# ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.environ.get("ADMIN_GROUP_ID")
-VIP_LINK = os.environ.get("VIP_LINK")
-
+VIP_LINK = os.environ.get("VIP_LINK", "")
 REREGISTRATION_LINK = os.environ.get("REREGISTRATION_LINK", "")
 PROMO_CODE = os.environ.get("PROMO_CODE", "")
 
@@ -33,95 +33,100 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get(
     "GOOGLE_SERVICE_ACCOUNT_JSON"
 )
 
-# Temporary storage; no Render disk required.
 DB_PATH = os.environ.get("DB_PATH", "/tmp/wxc_verification.db")
 PORT = int(os.environ.get("PORT", "10000"))
 
+SHEET_CACHE_TTL = 60
+
 if not BOT_TOKEN:
-    raise RuntimeError("Missing BOT_TOKEN.")
+    raise ValueError("Missing BOT_TOKEN environment variable.")
 
 if not ADMIN_GROUP_ID_RAW:
-    raise RuntimeError("Missing ADMIN_GROUP_ID.")
+    raise ValueError("Missing ADMIN_GROUP_ID environment variable.")
 
 if not VIP_LINK:
-    raise RuntimeError("Missing VIP_LINK.")
+    raise ValueError("Missing VIP_LINK environment variable.")
+
+if not GOOGLE_SHEET_ID:
+    raise ValueError("Missing GOOGLE_SHEET_ID environment variable.")
+
+if not GOOGLE_SERVICE_ACCOUNT_JSON:
+    raise ValueError(
+        "Missing GOOGLE_SERVICE_ACCOUNT_JSON environment variable."
+    )
 
 try:
     ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
-except ValueError:
-    raise RuntimeError("ADMIN_GROUP_ID must be a numeric Telegram chat ID.")
+except ValueError as exc:
+    raise ValueError("ADMIN_GROUP_ID must be an integer.") from exc
 
 
-# --------------------------------------------------
-# LOGGING AND BOT SETUP
-# --------------------------------------------------
+# ============================================================
+# LOGGING AND INITIALIZATION
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
+# In-memory state: resets whenever the process restarts.
 awaiting_account_id = set()
-awaiting_lock = threading.Lock()
 
 
-# --------------------------------------------------
+# ============================================================
 # DATABASE
-# --------------------------------------------------
+# ============================================================
 
 def get_db_connection():
-    directory = os.path.dirname(os.path.abspath(DB_PATH))
-    os.makedirs(directory, exist_ok=True)
-
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+    connection = sqlite3.connect(DB_PATH, timeout=30)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
 def initialize_database():
-    with get_db_connection() as conn:
-        conn.execute("""
+    with get_db_connection() as connection:
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS verifications (
                 telegram_user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 account_id TEXT,
-                status TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new',
                 admin_message_id INTEGER,
-                updated_at INTEGER NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 attempt_count INTEGER NOT NULL DEFAULT 0
             )
         """)
 
-        # Migrate an existing database created by an older version.
         columns = {
             row["name"]
-            for row in conn.execute(
+            for row in connection.execute(
                 "PRAGMA table_info(verifications)"
             ).fetchall()
         }
 
         if "attempt_count" not in columns:
-            conn.execute("""
+            connection.execute("""
                 ALTER TABLE verifications
                 ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0
             """)
 
-        conn.commit()
-
-    logger.info("Database initialized at %s", DB_PATH)
+    logging.info("Database initialized at %s", DB_PATH)
 
 
 def get_verification(user_id):
-    with get_db_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM verifications WHERE telegram_user_id = ?",
-            (user_id,)
-        ).fetchone()
+    with get_db_connection() as connection:
+        row = connection.execute("""
+            SELECT *
+            FROM verifications
+            WHERE telegram_user_id = ?
+        """, (user_id,)).fetchone()
+
+    return dict(row) if row else None
 
 
 def save_verification(
@@ -133,21 +138,26 @@ def save_verification(
     admin_message_id=None,
     attempt_count=0
 ):
-    with get_db_connection() as conn:
-        conn.execute("""
+    with get_db_connection() as connection:
+        connection.execute("""
             INSERT INTO verifications (
-                telegram_user_id, username, first_name,
-                account_id, status, admin_message_id,
-                updated_at, attempt_count
+                telegram_user_id,
+                username,
+                first_name,
+                account_id,
+                status,
+                admin_message_id,
+                updated_at,
+                attempt_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             ON CONFLICT(telegram_user_id) DO UPDATE SET
                 username = excluded.username,
                 first_name = excluded.first_name,
                 account_id = excluded.account_id,
                 status = excluded.status,
                 admin_message_id = excluded.admin_message_id,
-                updated_at = excluded.updated_at,
+                updated_at = CURRENT_TIMESTAMP,
                 attempt_count = excluded.attempt_count
         """, (
             user_id,
@@ -156,35 +166,54 @@ def save_verification(
             account_id,
             status,
             admin_message_id,
-            int(time.time()),
             attempt_count
         ))
-        conn.commit()
 
 
-def set_verification_status(user_id, status):
-    with get_db_connection() as conn:
-        cursor = conn.execute("""
-            UPDATE verifications
-            SET status = ?, updated_at = ?
-            WHERE telegram_user_id = ? AND status = 'pending'
-        """, (status, int(time.time()), user_id))
-        conn.commit()
-        return cursor.rowcount == 1
+def set_verification_status(
+    user_id,
+    status,
+    admin_message_id=None,
+    attempt_count=None
+):
+    with get_db_connection() as connection:
+        if attempt_count is None:
+            connection.execute("""
+                UPDATE verifications
+                SET status = ?,
+                    admin_message_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE telegram_user_id = ?
+            """, (status, admin_message_id, user_id))
+        else:
+            connection.execute("""
+                UPDATE verifications
+                SET status = ?,
+                    admin_message_id = ?,
+                    attempt_count = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE telegram_user_id = ?
+            """, (
+                status,
+                admin_message_id,
+                attempt_count,
+                user_id
+            ))
 
 
-# --------------------------------------------------
-# GOOGLE SHEETS
-# Player IDs start at E11.
-# --------------------------------------------------
+# ============================================================
+# GOOGLE SHEETS AND CACHING
+# ============================================================
+
+_sheet_lock = threading.Lock()
+
+_sheet_cache = {
+    "account_ids": None,
+    "loaded_at": 0
+}
+
 
 def connect_to_google_sheet():
-    if not GOOGLE_SHEET_ID:
-        raise RuntimeError("Missing GOOGLE_SHEET_ID.")
-
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON.")
-
     credentials_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
 
     credentials = Credentials.from_service_account_info(
@@ -196,52 +225,160 @@ def connect_to_google_sheet():
 
     client = gspread.authorize(credentials)
 
-    sheet_id = GOOGLE_SHEET_ID.strip()
-    match = re.search(
-        r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_id
-    )
-    if match:
-        sheet_id = match.group(1)
+    spreadsheet_id = GOOGLE_SHEET_ID.strip()
 
-    spreadsheet = client.open_by_key(sheet_id)
-    return spreadsheet.worksheet(GOOGLE_WORKSHEET_NAME)
+    # Accept either the spreadsheet ID or its full URL.
+    match = re.search(
+        r"/spreadsheets/d/([a-zA-Z0-9_-]+)",
+        spreadsheet_id
+    )
+
+    if match:
+        spreadsheet_id = match.group(1)
+
+    spreadsheet = client.open_by_key(spreadsheet_id)
+
+    try:
+        worksheet = spreadsheet.worksheet(GOOGLE_WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        available_tabs = [
+            sheet.title for sheet in spreadsheet.worksheets()
+        ]
+        logging.error(
+            "Worksheet '%s' not found. Available tabs: %s",
+            GOOGLE_WORKSHEET_NAME,
+            available_tabs
+        )
+        raise
+
+    return worksheet
+
+
+def load_account_ids_from_sheet():
+    worksheet = connect_to_google_sheet()
+
+    # Account IDs are in column E, starting from row 11.
+    values = worksheet.get("E11:E")
+
+    account_ids = set()
+
+    for row in values:
+        if row and str(row[0]).strip():
+            account_ids.add(str(row[0]).strip().casefold())
+
+    logging.info(
+        "Loaded %d account IDs from Google Sheets.",
+        len(account_ids)
+    )
+
+    return account_ids
+
+
+def get_account_ids():
+    now = time.monotonic()
+    cached_ids = _sheet_cache["account_ids"]
+    loaded_at = _sheet_cache["loaded_at"]
+
+    if (
+        cached_ids is not None
+        and now - loaded_at < SHEET_CACHE_TTL
+    ):
+        return cached_ids
+
+    with _sheet_lock:
+        now = time.monotonic()
+        cached_ids = _sheet_cache["account_ids"]
+        loaded_at = _sheet_cache["loaded_at"]
+
+        if (
+            cached_ids is not None
+            and now - loaded_at < SHEET_CACHE_TTL
+        ):
+            return cached_ids
+
+        # Only replace the cache after a successful refresh.
+        fresh_ids = load_account_ids_from_sheet()
+
+        _sheet_cache["account_ids"] = fresh_ids
+        _sheet_cache["loaded_at"] = time.monotonic()
+
+        return fresh_ids
 
 
 def lookup_account_in_sheet(account_id):
     try:
-        worksheet = connect_to_google_sheet()
-        player_ids = worksheet.get("E11:E")
-        submitted_id = str(account_id).strip()
+        account_ids = get_account_ids()
 
-        for row in player_ids:
-            if not row:
-                continue
-
-            sheet_account_id = str(row[0]).strip()
-
-            if sheet_account_id and sheet_account_id == submitted_id:
-                return "found", None
+        if account_id.strip().casefold() in account_ids:
+            return "found", None
 
         return "not_found", None
 
-    except Exception:
-        logger.exception("Google Sheets lookup failed.")
-        return "error", None
+    except Exception as exc:
+        logging.exception("Google Sheets lookup failed.")
+        return "error", str(exc)
 
 
-# --------------------------------------------------
-# MESSAGE HELPERS
-# --------------------------------------------------
+# ============================================================
+# USER MESSAGES
+# ============================================================
+
+WELCOME_MESSAGE = (
+    "Welcome to the <b>WXC Verification Bot</b>! 🚀\n\n"
+    "To get instant, free access to our "
+    "<b>Exclusive WXC Channel</b>, "
+    "please provide proof that you are registered under "
+    "our official promo code.\n\n"
+    "👉 <b>Please reply by typing your Betting Account ID.</b>"
+)
+
+ACCOUNT_ID_INSTRUCTIONS = (
+    "📝 Please type your 1X Account ID.\n\n"
+    "How to find your 1X Account ID?\n"
+    "1. Log in to your account.\n"
+    "2. Tap your <b>Profile/Account Icon</b>.\n"
+    "3. Look for your <b>Account Number</b> in your profile details.\n"
+    "4. Copy your ID and send it here for verification.\n\n"
+    "⚠️ <b>PLEASE SEND YOUR ACCOUNT ID ONLY.</b> "
+    "Never share your <b>Password or OTP</b>."
+)
+
+PENDING_MESSAGE = (
+    "⏳ Your submission is already being processed.\n\n"
+    "Please wait for the Admin team's decision."
+)
+
+
+def approved_welcome_message():
+    return (
+        "🎉 <b>Welcome to the Exclusive WXC Channel!</b> 🏆\n\n"
+        "Congratulations! Your verification is complete, "
+        "and you're now ready to join the WXC community! 🚀\n\n"
+        "Get ready to enjoy exclusive perks, including:\n\n"
+        "🎁 <b>Exclusive Raffles &amp; Prizes</b> — "
+        "Get a chance to win exciting rewards!\n"
+        "🎯 <b>Free Bets &amp; Promotions</b> — "
+        "Watch out for special offers and giveaways!\n"
+        "📊 <b>Betting Tips &amp; Insights</b> — "
+        "Stay updated with tips and match analysis.\n"
+        "🔥 <b>Exclusive Updates</b> — "
+        "Don't miss upcoming events and community activities!\n\n"
+        "👇 <b>Click the link below to join your "
+        "Exclusive WXC Channel:</b>\n\n"
+        f"🔗 {html.escape(VIP_LINK)}\n\n"
+        "💚 Welcome aboard! 🚀"
+    )
+
 
 def registration_instructions():
     return (
         "❌ Unfortunately, your verification has failed.\n\n"
         "You may register using the link below and make sure "
         "to use our promo code.\n\n"
-        f"🔗 Registration link: {REREGISTRATION_LINK}\n"
-        f"🎟 Promo code: {PROMO_CODE}\n\n"
-        "Once you have successfully registered using our promo "
-        "code, please type in your account ID again."
+        f"🔗 Registration link: {html.escape(REREGISTRATION_LINK)}\n"
+        f"🎟 Promo code: {html.escape(PROMO_CODE)}\n\n"
+        "Once you have successfully registered using our "
+        "promo code, please type in your account ID again."
     )
 
 
@@ -249,99 +386,171 @@ def rejection_message():
     return (
         "❌ Unfortunately, your verification was rejected.\n\n"
         "You may register again using the link below.\n\n"
-        f"🔗 Re-registration link: {REREGISTRATION_LINK}\n"
-        f"🎟 Promo code: {PROMO_CODE}\n\n"
-        "Once you have successfully registered using our promo "
-        "code, please type in your account ID again."
+        f"🔗 Re-registration link: {html.escape(REREGISTRATION_LINK)}\n"
+        f"🎟 Promo code: {html.escape(PROMO_CODE)}\n\n"
+        "Once you have successfully registered using our "
+        "promo code, please type in your account ID again."
     )
 
 
+# ============================================================
+# KEYBOARDS
+# ============================================================
+
 def start_keyboard(user_id):
     keyboard = InlineKeyboardMarkup()
+
     keyboard.add(
         InlineKeyboardButton(
             "🚀 Start Verification",
             callback_data=f"begin_{user_id}"
         )
     )
+
     return keyboard
 
 
 def admin_review_keyboard(user_id):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
+    keyboard = InlineKeyboardMarkup()
+
+    keyboard.row(
         InlineKeyboardButton(
             "✅ Approve",
-            callback_data=f"review:approve:{user_id}"
+            callback_data=f"approve_{user_id}"
         ),
         InlineKeyboardButton(
             "❌ Reject",
-            callback_data=f"review:reject:{user_id}"
+            callback_data=f"reject_{user_id}"
         )
     )
+
     return keyboard
 
 
-def ask_for_account_id(chat_id):
-    bot.send_message(
-        chat_id,
-        "Please type in your account ID.\n\n"
-        "🔒 Never send your password or OTP."
+# ============================================================
+# ADMIN NOTIFICATIONS
+# ============================================================
+
+def notify_admin_success(user, account_id):
+    username = (
+        f"@{html.escape(user.username)}"
+        if user.username
+        else "Not set"
+    )
+
+    message = (
+        "✅ <b>ACCOUNT ID SUCCESSFULLY VERIFIED</b>\n\n"
+        f"👤 Name: {html.escape(user.first_name or 'Unknown')}\n"
+        f"📱 Username: {username}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n"
+        f"🎮 Account ID: <code>{html.escape(account_id)}</code>\n"
+        "📋 Status: Automatically Approved"
+    )
+
+    try:
+        bot.send_message(
+            ADMIN_GROUP_ID,
+            message,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    except Exception:
+        logging.exception(
+            "Verification succeeded, but the success notification "
+            "could not be sent to the Admin GC."
+        )
+
+
+def send_manual_review_request(user, account_id, reason):
+    username = (
+        f"@{html.escape(user.username)}"
+        if user.username
+        else "Not set"
+    )
+
+    message = (
+        "🔎 <b>VERIFICATION REQUIRES MANUAL REVIEW</b>\n\n"
+        f"👤 Name: {html.escape(user.first_name or 'Unknown')}\n"
+        f"📱 Username: {username}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n"
+        f"🎮 Account ID: <code>{html.escape(account_id)}</code>\n"
+        f"📝 Reason: {html.escape(reason)}\n\n"
+        "Please review this member's verification."
+    )
+
+    return bot.send_message(
+        ADMIN_GROUP_ID,
+        message,
+        parse_mode="HTML",
+        reply_markup=admin_review_keyboard(user.id)
     )
 
 
-# --------------------------------------------------
+def ask_for_account_id(user_id):
+    bot.send_message(
+        user_id,
+        ACCOUNT_ID_INSTRUCTIONS,
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
 # /START
-# --------------------------------------------------
+# ============================================================
 
 @bot.message_handler(commands=["start"])
 def start_command(message):
     user_id = message.from_user.id
-    existing = get_verification(user_id)
+    verification = get_verification(user_id)
 
-    if existing:
-        status = existing["status"]
+    if verification:
+        status = verification["status"]
 
         if status == "approved":
-            bot.reply_to(
-                message,
-                f"✅ You have already been verified.\n\nVIP access: {VIP_LINK}"
+            # Already verified: don't allow another submission.
+            awaiting_account_id.discard(user_id)
+            bot.send_message(
+                user_id,
+                approved_welcome_message(),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
             return
 
         if status == "pending":
-            bot.reply_to(
-                message,
-                "⏳ Your verification is pending admin review. Please wait."
+            awaiting_account_id.discard(user_id)
+            bot.send_message(user_id, PENDING_MESSAGE)
+            return
+
+        if status == "failed":
+            awaiting_account_id.add(user_id)
+            bot.send_message(
+                user_id,
+                registration_instructions(),
+                parse_mode="HTML"
             )
             return
 
         if status == "rejected":
-            with awaiting_lock:
-                awaiting_account_id.add(user_id)
-
-            bot.send_message(message.chat.id, rejection_message())
-            return
-
-        if status == "failed":
-            with awaiting_lock:
-                awaiting_account_id.add(user_id)
-
-            bot.send_message(message.chat.id, registration_instructions())
+            awaiting_account_id.add(user_id)
+            bot.send_message(
+                user_id,
+                rejection_message(),
+                parse_mode="HTML"
+            )
             return
 
     bot.send_message(
-        message.chat.id,
-        "Welcome to WXC Verification!\n\n"
-        "Verify your 1XBET account to access the VIP group.\n\n"
-        "Press the button below to begin.",
+        user_id,
+        WELCOME_MESSAGE,
+        parse_mode="HTML",
         reply_markup=start_keyboard(user_id)
     )
 
 
-# --------------------------------------------------
-# BEGIN VERIFICATION
-# --------------------------------------------------
+# ============================================================
+# START VERIFICATION BUTTON
+# ============================================================
 
 @bot.callback_query_handler(
     func=lambda call: call.data.startswith("begin_")
@@ -350,365 +559,472 @@ def begin_verification(call):
     try:
         target_user_id = int(call.data.split("_", 1)[1])
     except (ValueError, IndexError):
-        bot.answer_callback_query(call.id, "Invalid request.")
+        bot.answer_callback_query(
+            call.id,
+            "Invalid request.",
+            show_alert=True
+        )
         return
 
     if call.from_user.id != target_user_id:
         bot.answer_callback_query(
             call.id,
-            "Please start verification from your own chat.",
+            "This button belongs to another user.",
             show_alert=True
         )
         return
 
-    existing = get_verification(target_user_id)
+    verification = get_verification(target_user_id)
 
-    if existing:
-        status = existing["status"]
+    if verification:
+        status = verification["status"]
 
         if status == "approved":
-            bot.answer_callback_query(call.id, "Already verified.")
+            bot.answer_callback_query(
+                call.id,
+                "You are already verified."
+            )
             bot.send_message(
-                call.message.chat.id,
-                f"✅ You are verified.\nVIP access: {VIP_LINK}"
+                target_user_id,
+                approved_welcome_message(),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
             return
 
         if status == "pending":
             bot.answer_callback_query(
-                call.id, "Your request is pending review."
+                call.id,
+                "Your submission is already being processed."
             )
+            bot.send_message(target_user_id, PENDING_MESSAGE)
             return
 
-    with awaiting_lock:
-        awaiting_account_id.add(target_user_id)
+    awaiting_account_id.add(target_user_id)
 
-    bot.answer_callback_query(call.id)
-    ask_for_account_id(call.message.chat.id)
+    bot.answer_callback_query(call.id, "Verification started.")
+    ask_for_account_id(target_user_id)
 
 
-# --------------------------------------------------
-# RECEIVE ACCOUNT ID
-# --------------------------------------------------
+# ============================================================
+# RECEIVE ACCOUNT ID AND HANDLE REPEAT MESSAGES
+# ============================================================
 
 @bot.message_handler(
+    content_types=["text"],
     func=lambda message: (
-        message.from_user is not None
-        and message.chat.type == "private"
-        and message.from_user.id in awaiting_account_id
+        message.chat.type == "private"
+        and message.from_user is not None
+        and not message.text.startswith("/")
     )
 )
 def receive_account_id(message):
     user = message.from_user
     user_id = user.id
-    account_id = (message.text or "").strip()
-
-    if not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", account_id):
-        bot.reply_to(
-            message,
-            "That ID format doesn't look valid. Please send your "
-            "account ID using 3–64 letters, numbers, underscores, "
-            "or hyphens."
-        )
-        return
 
     existing = get_verification(user_id)
 
-    if existing and existing["status"] in ("approved", "pending"):
-        with awaiting_lock:
-            awaiting_account_id.discard(user_id)
+    # Approved users cannot submit again. Telegram does not let
+    # bots prevent a user from sending a message, so the bot ignores it.
+    if existing and existing["status"] == "approved":
+        awaiting_account_id.discard(user_id)
+        return
 
-        bot.reply_to(
-            message,
-            "You already have a verification record. "
-            "Please wait for the existing review."
+    # Always tell pending users their submission is being processed.
+    if existing and existing["status"] == "pending":
+        awaiting_account_id.discard(user_id)
+        bot.send_message(user_id, PENDING_MESSAGE)
+        return
+
+    # Do not process unsolicited messages before verification starts.
+    if user_id not in awaiting_account_id:
+        bot.send_message(
+            user_id,
+            "Please press <b>Start Verification</b> to begin.",
+            parse_mode="HTML",
+            reply_markup=start_keyboard(user_id)
+        )
+        return
+
+    account_id = message.text.strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", account_id):
+        bot.send_message(
+            user_id,
+            "⚠️ That account ID format doesn't look valid.\n\n"
+            "Please send only your account ID using letters, "
+            "numbers, underscores, or hyphens (3–64 characters)."
         )
         return
 
     previous_attempts = (
-        existing["attempt_count"] if existing else 0
+        existing.get("attempt_count", 0)
+        if existing
+        else 0
     )
-    attempt_number = previous_attempts + 1
+    attempt_count = previous_attempts + 1
 
-    bot.send_message(
-        message.chat.id,
-        "🔎 Checking your account ID. Please wait..."
-    )
+    result, error_message = lookup_account_in_sheet(account_id)
 
-    result, _ = lookup_account_in_sheet(account_id)
+    # --------------------------------------------------------
+    # SUCCESSFUL GOOGLE SHEETS MATCH
+    # --------------------------------------------------------
 
-    # Found in Google Sheets: automatic approval.
     if result == "found":
-        with awaiting_lock:
-            awaiting_account_id.discard(user_id)
-
         save_verification(
             user_id=user_id,
-            username=user.username or "",
-            first_name=user.first_name or "",
+            username=user.username,
+            first_name=user.first_name,
             account_id=account_id,
             status="approved",
-            attempt_count=attempt_number
+            admin_message_id=None,
+            attempt_count=attempt_count
         )
 
-        bot.send_message(
-            message.chat.id,
-            "✅ Your account ID was found in the registration list!\n\n"
-            f"VIP access: {VIP_LINK}"
-        )
+        awaiting_account_id.discard(user_id)
 
-        logger.info("Automatically approved Telegram user %s", user_id)
+        # Send the full welcome message and VIP link.
+        try:
+            bot.send_message(
+                user_id,
+                approved_welcome_message(),
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception:
+            logging.exception(
+                "Account ID verified, but the welcome message "
+                "could not be delivered to user %s.",
+                user_id
+            )
+
+        # Notify the Admin GC after a successful automatic match.
+        notify_admin_success(user, account_id)
+
+        logging.info(
+            "Automatically verified user %s with account ID %s.",
+            user_id,
+            account_id
+        )
         return
 
-    # First lookup failure because the ID is not found:
-    # prompt registration and let the user submit again.
-    if result == "not_found" and attempt_number == 1:
+    # --------------------------------------------------------
+    # FIRST FAILED LOOKUP
+    # --------------------------------------------------------
+
+    if result == "not_found" and attempt_count == 1:
         save_verification(
             user_id=user_id,
-            username=user.username or "",
-            first_name=user.first_name or "",
+            username=user.username,
+            first_name=user.first_name,
             account_id=account_id,
             status="failed",
-            attempt_count=1
+            admin_message_id=None,
+            attempt_count=attempt_count
         )
 
-        with awaiting_lock:
-            awaiting_account_id.add(user_id)
+        # Keep the user eligible to submit again.
+        awaiting_account_id.add(user_id)
 
         bot.send_message(
-            message.chat.id,
-            registration_instructions()
+            user_id,
+            registration_instructions(),
+            parse_mode="HTML"
         )
         return
 
-    # Second attempt not found, or a Google Sheets error:
-    # send for manual review.
-    if result == "not_found":
+    # --------------------------------------------------------
+    # MANUAL REVIEW: SECOND FAILURE OR SHEETS ERROR
+    # --------------------------------------------------------
+
+    if result == "error":
         reason = (
-            "Account ID was not found after the second attempt."
+            "Google Sheets lookup error; manual verification "
+            "is required."
+        )
+
+        logging.error(
+            "Google Sheets error for user %s: %s",
+            user_id,
+            error_message
         )
     else:
         reason = (
-            "Google Sheets lookup failed. Manual review is required."
+            "Account ID was not found after the registration retry."
         )
+
+    try:
+        admin_message = send_manual_review_request(
+            user,
+            account_id,
+            reason
+        )
+    except Exception:
+        logging.exception(
+            "Could not send manual review request to Admin GC."
+        )
+
+        save_verification(
+            user_id=user_id,
+            username=user.username,
+            first_name=user.first_name,
+            account_id=account_id,
+            status="failed",
+            admin_message_id=None,
+            attempt_count=attempt_count
+        )
+
+        awaiting_account_id.add(user_id)
+
+        bot.send_message(
+            user_id,
+            "⚠️ We couldn't forward your submission for review "
+            "right now. Please try again in a little while."
+        )
+        return
 
     save_verification(
         user_id=user_id,
-        username=user.username or "",
-        first_name=user.first_name or "",
+        username=user.username,
+        first_name=user.first_name,
         account_id=account_id,
         status="pending",
-        attempt_count=attempt_number
+        admin_message_id=admin_message.message_id,
+        attempt_count=attempt_count
     )
 
-    with awaiting_lock:
-        awaiting_account_id.discard(user_id)
+    awaiting_account_id.discard(user_id)
 
-    username_display = (
-        f"@{user.username}" if user.username else "(no username)"
+    bot.send_message(
+        user_id,
+        PENDING_MESSAGE
     )
 
-    admin_text = (
-        "📝 WXC VERIFICATION REVIEW\n\n"
-        f"Name: {user.first_name or 'Unknown'}\n"
-        f"Username: {username_display}\n"
-        f"Telegram ID: {user_id}\n"
-        f"Submitted account ID: {account_id}\n"
-        f"Attempt: {attempt_number}\n\n"
-        f"Reason: {reason}"
-    )
 
+# ============================================================
+# ADMIN APPROVE / REJECT
+# ============================================================
+
+def is_admin(user_id):
     try:
-        admin_message = bot.send_message(
+        member = bot.get_chat_member(
             ADMIN_GROUP_ID,
-            admin_text,
-            reply_markup=admin_review_keyboard(user_id)
+            user_id
         )
-
-        save_verification(
-            user_id=user_id,
-            username=user.username or "",
-            first_name=user.first_name or "",
-            account_id=account_id,
-            status="pending",
-            admin_message_id=admin_message.message_id,
-            attempt_count=attempt_number
-        )
-
-        bot.send_message(
-            message.chat.id,
-            "🕒 Your account ID has been sent to our admins "
-            "for manual review. Please wait for their decision."
-        )
-
-    except Exception:
-        logger.exception("Could not notify Admin GC.")
-
-        # Keep the request retryable if the admin group could not be reached.
-        save_verification(
-            user_id=user_id,
-            username=user.username or "",
-            first_name=user.first_name or "",
-            account_id=account_id,
-            status="failed",
-            attempt_count=max(0, attempt_number - 1)
-        )
-
-        with awaiting_lock:
-            awaiting_account_id.add(user_id)
-
-        bot.send_message(
-            message.chat.id,
-            "⚠️ We couldn't notify the admin group. "
-            "Please try submitting your account ID again shortly."
-        )
-
-
-# --------------------------------------------------
-# ADMIN REVIEW
-# --------------------------------------------------
-
-def is_admin(chat_id, user_id):
-    try:
-        member = bot.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
+
     except Exception:
-        logger.exception("Could not check admin status.")
+        logging.exception("Could not check admin permissions.")
         return False
 
 
 @bot.callback_query_handler(
-    func=lambda call: call.data.startswith("review:")
+    func=lambda call: (
+        call.data.startswith("approve_")
+        or call.data.startswith("reject_")
+    )
 )
 def review_verification(call):
-    parts = call.data.split(":")
-
-    if len(parts) != 3:
-        bot.answer_callback_query(call.id, "Invalid review request.")
+    if (
+        call.message is None
+        or call.message.chat.id != ADMIN_GROUP_ID
+    ):
+        bot.answer_callback_query(
+            call.id,
+            "This action is only available in the Admin GC.",
+            show_alert=True
+        )
         return
 
-    _, action, user_id_raw = parts
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(
+            call.id,
+            "You are not authorized to review verifications.",
+            show_alert=True
+        )
+        return
 
     try:
-        target_user_id = int(user_id_raw)
-    except ValueError:
-        bot.answer_callback_query(call.id, "Invalid user ID.")
-        return
-
-    if call.message.chat.id != ADMIN_GROUP_ID:
+        action, user_id_text = call.data.split("_", 1)
+        target_user_id = int(user_id_text)
+    except (ValueError, IndexError):
         bot.answer_callback_query(
             call.id,
-            "This action is only allowed in the Admin GC.",
+            "Invalid review request.",
             show_alert=True
         )
         return
 
-    if not is_admin(ADMIN_GROUP_ID, call.from_user.id):
+    verification = get_verification(target_user_id)
+
+    if not verification:
         bot.answer_callback_query(
             call.id,
-            "Only Admin GC administrators can review requests.",
+            "Verification record not found.",
             show_alert=True
         )
         return
 
-    if action not in ("approve", "reject"):
-        bot.answer_callback_query(call.id, "Unknown action.")
-        return
-
-    new_status = "approved" if action == "approve" else "rejected"
-
-    if not set_verification_status(target_user_id, new_status):
+    if verification["status"] != "pending":
         bot.answer_callback_query(
             call.id,
-            "This request has already been processed or no longer exists.",
+            "This verification has already been processed.",
             show_alert=True
         )
         return
 
-    record = get_verification(target_user_id)
-    attempts = record["attempt_count"] if record else 0
+    account_id = verification["account_id"]
+    reviewer = html.escape(
+        call.from_user.first_name or "Admin"
+    )
 
-    if new_status == "approved":
-        user_message = (
-            "✅ Your verification has been approved!\n\n"
-            f"VIP access: {VIP_LINK}"
+    if action == "approve":
+        set_verification_status(
+            target_user_id,
+            "approved",
+            admin_message_id=None
         )
-        admin_result = "✅ APPROVED"
 
-        with awaiting_lock:
-            awaiting_account_id.discard(target_user_id)
+        awaiting_account_id.discard(target_user_id)
 
-    else:
-        user_message = rejection_message()
-        admin_result = "❌ REJECTED"
+        try:
+            bot.send_message(
+                target_user_id,
+                approved_welcome_message(),
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception:
+            logging.exception(
+                "Could not send approval message to user %s.",
+                target_user_id
+            )
 
-        # Let rejected users submit a new account ID.
-        # Reset the attempt cycle after the admin's decision.
-        save_verification(
-            user_id=target_user_id,
-            username=record["username"] if record else "",
-            first_name=record["first_name"] if record else "",
-            account_id=record["account_id"] if record else "",
-            status="rejected",
+        updated_message = (
+            "✅ <b>VERIFICATION APPROVED</b>\n\n"
+            f"🆔 Telegram ID: <code>{target_user_id}</code>\n"
+            f"🎮 Account ID: <code>{html.escape(account_id)}</code>\n"
+            f"👮 Reviewed by: {reviewer}"
+        )
+
+        try:
+            bot.edit_message_text(
+                updated_message,
+                chat_id=ADMIN_GROUP_ID,
+                message_id=call.message.message_id,
+                parse_mode="HTML"
+            )
+        except Exception:
+            logging.exception(
+                "Could not update the Admin GC review message."
+            )
+
+        bot.answer_callback_query(
+            call.id,
+            "Verification approved."
+        )
+
+        logging.info(
+            "Admin %s approved user %s.",
+            call.from_user.id,
+            target_user_id
+        )
+        return
+
+    if action == "reject":
+        set_verification_status(
+            target_user_id,
+            "rejected",
+            admin_message_id=None,
             attempt_count=0
         )
 
-        with awaiting_lock:
-            awaiting_account_id.add(target_user_id)
+        # Allow the member to submit a new account ID.
+        awaiting_account_id.add(target_user_id)
 
-    try:
-        bot.send_message(target_user_id, user_message)
-    except Exception:
-        logger.exception("Could not notify user %s", target_user_id)
+        try:
+            bot.send_message(
+                target_user_id,
+                rejection_message(),
+                parse_mode="HTML"
+            )
+        except Exception:
+            logging.exception(
+                "Could not send rejection message to user %s.",
+                target_user_id
+            )
 
-    try:
-        bot.edit_message_text(
-            f"{call.message.text}\n\n{admin_result} by "
-            f"{call.from_user.first_name}.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=None
+        updated_message = (
+            "❌ <b>VERIFICATION REJECTED</b>\n\n"
+            f"🆔 Telegram ID: <code>{target_user_id}</code>\n"
+            f"🎮 Account ID: <code>{html.escape(account_id)}</code>\n"
+            f"👮 Reviewed by: {reviewer}"
         )
-    except Exception:
-        logger.exception("Could not update admin review message.")
 
-    bot.answer_callback_query(call.id, admin_result)
+        try:
+            bot.edit_message_text(
+                updated_message,
+                chat_id=ADMIN_GROUP_ID,
+                message_id=call.message.message_id,
+                parse_mode="HTML"
+            )
+        except Exception:
+            logging.exception(
+                "Could not update the Admin GC review message."
+            )
+
+        bot.answer_callback_query(
+            call.id,
+            "Verification rejected."
+        )
+
+        logging.info(
+            "Admin %s rejected user %s.",
+            call.from_user.id,
+            target_user_id
+        )
 
 
-# --------------------------------------------------
-# FLASK HEALTH ENDPOINTS
-# --------------------------------------------------
+# ============================================================
+# FLASK HEALTH CHECKS
+# ============================================================
 
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def home():
     return "WXC Verification Bot is alive!", 200
 
 
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok",
-        "bot": "WXC Verification Bot"
+        "service": "WXC Verification Bot"
     }), 200
 
 
-def run_web_server():
-    app.run(host="0.0.0.0", port=PORT, use_reloader=False)
+def run_flask():
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False
+    )
 
 
-# --------------------------------------------------
-# STARTUP
-# --------------------------------------------------
+# ============================================================
+# STARTUP AND POLLING
+# ============================================================
 
 if __name__ == "__main__":
     initialize_database()
 
-    threading.Thread(
-        target=run_web_server,
+    flask_thread = threading.Thread(
+        target=run_flask,
         daemon=True
-    ).start()
+    )
+    flask_thread.start()
 
-    logger.info("Starting Telegram bot polling.")
+    logging.info("Starting Telegram bot polling.")
 
     while True:
         try:
@@ -717,8 +1033,10 @@ if __name__ == "__main__":
                 long_polling_timeout=30,
                 skip_pending=True
             )
+
         except Exception:
-            logger.exception(
-                "Telegram polling stopped unexpectedly. Retrying in 5 seconds."
+            logging.exception(
+                "Telegram polling stopped unexpectedly. "
+                "Retrying in 5 seconds."
             )
             time.sleep(5)
