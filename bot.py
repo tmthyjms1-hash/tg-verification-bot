@@ -220,51 +220,28 @@ def normalize_header(value):
     return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
 
 
+
 def lookup_account_in_sheet(account_id):
     """
+    Checks player IDs in column E, starting at E11.
     Returns:
-        ("found", None)      Account ID exists in the sheet.
-        ("not_found", None)  Successful lookup, no matching ID.
-        ("error", None)      Sheet could not be checked.
+        ("found", None)      ID exists in the list.
+        ("not_found", None)  ID is not in the list.
+        ("error", None)      Google Sheets lookup failed.
     """
     try:
         worksheet = connect_to_google_sheet()
-        rows = worksheet.get_all_values()
 
-        if not rows:
-            logger.error("Google Sheet is empty or has no header.")
-            return "error", None
-
-        headers = rows[0]
-
-        accepted_headers = {
-            "accountid",
-            "userid",
-            "playerid",
-            "id",
-        }
-
-        account_column = None
-
-        for index, header in enumerate(headers):
-            if normalize_header(header) in accepted_headers:
-                account_column = index
-                break
-
-        if account_column is None:
-            logger.error(
-                "No Account ID column found. Use a header such as "
-                "'Account ID', 'User ID', or 'Player ID'."
-            )
-            return "error", None
+        # Read column E starting from row 11.
+        player_ids = worksheet.get("E11:E")
 
         submitted_id = str(account_id).strip()
 
-        for row in rows[1:]:
-            if len(row) <= account_column:
+        for row in player_ids:
+            if not row:
                 continue
 
-            sheet_account_id = str(row[account_column]).strip()
+            sheet_account_id = str(row[0]).strip()
 
             if sheet_account_id and sheet_account_id == submitted_id:
                 return "found", None
