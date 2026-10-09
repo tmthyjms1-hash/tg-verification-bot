@@ -84,11 +84,10 @@ def start(message):
 
     bot.send_message(
         message.chat.id,
-        "👋 Welcome!\n\n"
-        "Ready to get verified?\n"
-        "Press the button below to begin.\n\n"
-        "Please prepare your Betting Account ID or "
-        "the required verification proof.",
+        "To get access to our exclusive channel, please provide your 1XBET account ID \n"
+        "to ensure you are registered under our official promo codes: \n"
+        "<b><i> 1XDOTAPH - JUSTML - FOCUSFIRE - ALOWXC \n\n </b></i>"
+        "Our team will check your ID against our system and send your invite link as soon as you are verified!"
         reply_markup=markup
     )
 
