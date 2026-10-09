@@ -86,8 +86,10 @@ def start(message):
     
     bot.send_message(
         message.chat.id,
-        "To get access to our exclusive channel, please provide your 1XBET account ID \n"
-        "to ensure you are registered under our official promo codes: \n"
+        " 👋 Welcome to the <b> WXC Verification Bot! </b> 🚀 \n\n"
+        "To get access to our exclusive channel, \n" 
+        "please provide your 1XBET account ID to ensure you are \n"
+        "registered under our official promo codes: \n\n"
         "<b><i> 1XDOTAPH - JUSTML - FOCUSFIRE - ALOWXC </i></b> \n\n"
         "Our team will check your ID against our system and send your invite link as soon as you are verified!",
         parse_mode="HTML",
