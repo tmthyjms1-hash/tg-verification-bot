@@ -329,7 +329,7 @@ WELCOME_MESSAGE = (
     "<b>Exclusive WXC Channel</b>, "
     "please provide proof that you are registered under "
     "our official promo code.\n\n"
-    "<b>Please reply by typing your Betting Account ID.</b>"
+    "<b>👇 Press Start Verification to begin. 👇</b>"
 )
 
 ACCOUNT_ID_INSTRUCTIONS = (
