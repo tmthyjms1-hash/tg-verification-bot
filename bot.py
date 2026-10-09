@@ -6,6 +6,8 @@ import html
 import sqlite3
 import logging
 import threading
+import unicodedata
+from decimal import Decimal, InvalidOperation
 
 import telebot
 import gspread
@@ -254,21 +256,77 @@ def connect_to_google_sheet():
     return worksheet
 
 
+def normalize_account_id(value):
+    """Normalize account IDs consistently from Google Sheets and Telegram.
+
+    Handles surrounding/hidden Unicode whitespace, non-breaking spaces,
+    numeric cells returned as floats (for example, 123456.0), thousands
+    separators in numeric-formatted cells, and scientific-notation strings.
+    It deliberately preserves letters, underscores, and hyphens.
+    """
+    if value is None:
+        return ""
+
+    # Convert numeric values without retaining an unnecessary trailing .0.
+    if isinstance(value, bool):
+        text = str(value)
+    elif isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, float):
+        if value.is_integer():
+            text = str(int(value))
+        else:
+            text = format(value, ".15g")
+    else:
+        text = str(value)
+
+    text = unicodedata.normalize("NFKC", text)
+    # Remove invisible characters that can be introduced by copying/pasting.
+    for invisible in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        text = text.replace(invisible, "")
+    text = text.replace("\u00a0", " ").strip()
+
+    # Numeric IDs sometimes arrive formatted as 123,456 or 123456.0.
+    numeric_text = text.replace(",", "")
+    if re.fullmatch(r"[+-]?\d+(?:\.0+)?", numeric_text):
+        if "." in numeric_text:
+            numeric_text = numeric_text.split(".", 1)[0]
+        text = numeric_text
+    elif re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+", text):
+        # Convert a scientific-notation string to ordinary decimal notation.
+        try:
+            decimal_value = Decimal(text)
+            if decimal_value.is_finite() and decimal_value == decimal_value.to_integral_value():
+                text = format(decimal_value.quantize(Decimal("1")), "f")
+        except (InvalidOperation, ValueError):
+            pass
+
+    return text.strip().casefold()
+
+
 def load_account_ids_from_sheet():
     worksheet = connect_to_google_sheet()
 
     # Account IDs are in column E, starting from row 11.
-    values = worksheet.get("E11:E")
+    # FORMATTED_VALUE preserves the displayed ID; normalize_account_id then
+    # handles common number-format differences before comparing IDs.
+    values = worksheet.get("E11:E", value_render_option="FORMATTED_VALUE")
 
     account_ids = set()
+    nonempty_rows = 0
 
     for row in values:
-        if row and str(row[0]).strip():
-            account_ids.add(str(row[0]).strip().casefold())
+        if row and row[0] is not None:
+            normalized_id = normalize_account_id(row[0])
+            if normalized_id:
+                account_ids.add(normalized_id)
+                nonempty_rows += 1
 
     logging.info(
-        "Loaded %d account IDs from Google Sheets.",
-        len(account_ids)
+        "Loaded %d unique account IDs from Google Sheets worksheet '%s' (range E11:E; %d non-empty rows).",
+        len(account_ids),
+        worksheet.title,
+        nonempty_rows
     )
 
     return account_ids
@@ -308,10 +366,23 @@ def get_account_ids():
 def lookup_account_in_sheet(account_id):
     try:
         account_ids = get_account_ids()
+        normalized_id = normalize_account_id(account_id)
 
-        if account_id.strip().casefold() in account_ids:
+        if normalized_id and normalized_id in account_ids:
+            logging.info(
+                "Account ID lookup matched (submitted length=%d; loaded IDs=%d).",
+                len(normalized_id),
+                len(account_ids)
+            )
             return "found", None
 
+        # Avoid printing the full account ID into logs.
+        logging.warning(
+            "Account ID lookup did not match (submitted length=%d; loaded IDs=%d; normalized length=%d).",
+            len(str(account_id).strip()),
+            len(account_ids),
+            len(normalized_id)
+        )
         return "not_found", None
 
     except Exception as exc:
@@ -1025,6 +1096,10 @@ if __name__ == "__main__":
     flask_thread.start()
 
     logging.info("Starting Telegram bot polling.")
+    logging.info(
+        "Account ID matching uses normalized text from column E starting at row 11. "
+        "For long numeric IDs, ensure Google Sheets has not rounded the underlying value."
+    )
 
     while True:
         try:
