@@ -140,7 +140,7 @@ def begin_verification(call):
         "2. Tap your <b>Profile/Account Icon</b> \n"
         "3. Look for your <b>Account Number</b> in your profile details. \n"
         "4. Copy your ID and send it here for verification. \n\n"
-        " ⚠️ <b> PLEASE SEND YOUR ACCOUNT ID ONLY. Never share your <b>Password or OTP</b>.",
+        " ⚠️ <b> PLEASE SEND YOUR ACCOUNT ID ONLY.</b> Never share your <b>Password or OTP</b>.",
         parse_mode="HTML"
     )
 
