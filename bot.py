@@ -23,7 +23,7 @@ from google.oauth2.service_account import Credentials
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.environ.get("ADMIN_GROUP_ID")
-WXC_CHANNEL_ID = os.environ.get("WXC_CHANNEL_ID", "").strip()
+VIP_LINK = os.environ.get("VIP_LINK", "")
 REREGISTRATION_LINK = os.environ.get("REREGISTRATION_LINK", "")
 PROMO_CODE = os.environ.get("PROMO_CODE", "")
 
@@ -46,8 +46,8 @@ if not BOT_TOKEN:
 if not ADMIN_GROUP_ID_RAW:
     raise ValueError("Missing ADMIN_GROUP_ID environment variable.")
 
-if not WXC_CHANNEL_ID:
-    raise ValueError("Missing WXC_CHANNEL_ID environment variable.")
+if not VIP_LINK:
+    raise ValueError("Missing VIP_LINK environment variable.")
 
 if not GOOGLE_SHEET_ID:
     raise ValueError("Missing GOOGLE_SHEET_ID environment variable.")
@@ -201,83 +201,6 @@ def set_verification_status(
                 attempt_count,
                 user_id
             ))
-
-
-def approve_account_id_if_unique(
-    user_id,
-    username,
-    first_name,
-    account_id,
-    attempt_count=0
-):
-    """Atomically approve a user only if no other approved user owns this ID.
-
-    BEGIN IMMEDIATE serializes competing approvals so two users cannot both
-    claim the same account ID at the same time within this SQLite database.
-    Returns (True, None) when approved, or (False, None) if another approved
-    Telegram user already has the normalized account ID.
-    """
-    normalized_candidate = normalize_account_id(account_id)
-    if not normalized_candidate:
-        return False, None
-
-    with get_db_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        approved_rows = connection.execute("""
-            SELECT telegram_user_id, account_id
-            FROM verifications
-            WHERE status = 'approved'
-              AND account_id IS NOT NULL
-              AND telegram_user_id != ?
-        """, (user_id,)).fetchall()
-
-        for row in approved_rows:
-            if normalize_account_id(row["account_id"]) == normalized_candidate:
-                logging.warning(
-                    "Duplicate account ID claim blocked for Telegram user %s; "
-                    "the ID is already assigned to another approved user.",
-                    user_id
-                )
-                return False, None
-
-        connection.execute("""
-            INSERT INTO verifications (
-                telegram_user_id,
-                username,
-                first_name,
-                account_id,
-                status,
-                admin_message_id,
-                updated_at,
-                attempt_count
-            )
-            VALUES (?, ?, ?, ?, 'approved', NULL, CURRENT_TIMESTAMP, ?)
-            ON CONFLICT(telegram_user_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name,
-                account_id = excluded.account_id,
-                status = 'approved',
-                admin_message_id = NULL,
-                updated_at = CURRENT_TIMESTAMP,
-                attempt_count = excluded.attempt_count
-        """, (
-            user_id,
-            username,
-            first_name,
-            account_id,
-            attempt_count
-        ))
-
-    logging.info("Account ID claim approved for Telegram user %s.", user_id)
-    return True, None
-
-
-def duplicate_account_message():
-    return (
-        "❌ <b>This account ID has already been used by another verified member.</b>\n\n"
-        "Each 1X Account ID can only be used once. Please submit your own "
-        "registered account ID. If you believe this is a mistake, contact the Admin team."
-    )
 
 
 # ============================================================
@@ -498,19 +421,7 @@ PENDING_MESSAGE = (
 
 
 def approved_welcome_message():
-    """Build the welcome message with a fresh, one-member invite link."""
-    try:
-        invite = bot.create_chat_invite_link(
-            chat_id=WXC_CHANNEL_ID,
-            member_limit=1,
-            expire_date=int(time.time()) + (24 * 60 * 60)
-        )
-        invite_link = invite.invite_link
-    except Exception:
-        logging.exception("Could not create a single-use WXC channel invite link.")
-        invite_link = None
-
-    message = (
+    return (
         "🎉 <b>Welcome to the Exclusive WXC Channel!</b> 🏆\n\n"
         "Congratulations! Your verification is complete, "
         "and you're now ready to join the WXC community! 🚀\n\n"
@@ -525,18 +436,9 @@ def approved_welcome_message():
         "Don't miss upcoming events and community activities!\n\n"
         "👇 <b>Click the link below to join your "
         "Exclusive WXC Channel:</b>\n\n"
+        f"🔗 {html.escape(VIP_LINK)}\n\n"
+        "💚 Welcome aboard! 🚀"
     )
-
-    if invite_link:
-        message += f"🔗 {html.escape(invite_link)}\n\n"
-    else:
-        message += (
-            "⚠️ Your invite link could not be generated right now. "
-            "Please contact the Admin team for assistance.\n\n"
-        )
-
-    message += "💚 Welcome aboard! 🚀"
-    return message
 
 
 def registration_instructions():
@@ -840,34 +742,15 @@ def receive_account_id(message):
     # --------------------------------------------------------
 
     if result == "found":
-        # A matching sheet ID is not enough: each ID may only belong to one
-        # approved Telegram account. The claim and approval happen atomically.
-        claimed, _ = approve_account_id_if_unique(
+        save_verification(
             user_id=user_id,
             username=user.username,
             first_name=user.first_name,
             account_id=account_id,
+            status="approved",
+            admin_message_id=None,
             attempt_count=attempt_count
         )
-
-        if not claimed:
-            # Do not count duplicate claims as failed Google Sheets attempts.
-            save_verification(
-                user_id=user_id,
-                username=user.username,
-                first_name=user.first_name,
-                account_id=account_id,
-                status="failed",
-                admin_message_id=None,
-                attempt_count=0
-            )
-            awaiting_account_id.add(user_id)
-            bot.send_message(
-                user_id,
-                duplicate_account_message(),
-                parse_mode="HTML"
-            )
-            return
 
         awaiting_account_id.discard(user_id)
 
@@ -1067,62 +950,11 @@ def review_verification(call):
     )
 
     if action == "approve":
-        # Manual approval must enforce the same one-ID-per-member rule.
-        claimed, _ = approve_account_id_if_unique(
-            user_id=target_user_id,
-            username=verification.get("username"),
-            first_name=verification.get("first_name"),
-            account_id=account_id,
-            attempt_count=verification.get("attempt_count", 0)
+        set_verification_status(
+            target_user_id,
+            "approved",
+            admin_message_id=None
         )
-
-        if not claimed:
-            set_verification_status(
-                target_user_id,
-                "failed",
-                admin_message_id=None,
-                attempt_count=0
-            )
-            awaiting_account_id.add(target_user_id)
-
-            try:
-                bot.send_message(
-                    target_user_id,
-                    duplicate_account_message(),
-                    parse_mode="HTML"
-                )
-            except Exception:
-                logging.exception(
-                    "Could not notify user %s that their account ID is a duplicate.",
-                    target_user_id
-                )
-
-            blocked_message = (
-                "⚠️ <b>APPROVAL BLOCKED — ACCOUNT ID ALREADY USED</b>\n\n"
-                f"🆔 Telegram ID: <code>{target_user_id}</code>\n"
-                f"🎮 Account ID: <code>{html.escape(account_id)}</code>\n"
-                f"👮 Reviewed by: {reviewer}\n\n"
-                "This ID is already assigned to another approved member. "
-                "The user may submit a different account ID."
-            )
-            try:
-                bot.edit_message_text(
-                    blocked_message,
-                    chat_id=ADMIN_GROUP_ID,
-                    message_id=call.message.message_id,
-                    parse_mode="HTML"
-                )
-            except Exception:
-                logging.exception(
-                    "Could not update the Admin GC message after blocking duplicate approval."
-                )
-
-            bot.answer_callback_query(
-                call.id,
-                "Approval blocked: this account ID is already used.",
-                show_alert=True
-            )
-            return
 
         awaiting_account_id.discard(target_user_id)
 
