@@ -23,7 +23,7 @@ from google.oauth2.service_account import Credentials
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.environ.get("ADMIN_GROUP_ID")
-VIP_LINK = os.environ.get("VIP_LINK", "")
+WXC_CHANNEL_ID = os.environ.get("WXC_CHANNEL_ID", "").strip()
 REREGISTRATION_LINK = os.environ.get("REREGISTRATION_LINK", "")
 PROMO_CODE = os.environ.get("PROMO_CODE", "")
 
@@ -46,8 +46,8 @@ if not BOT_TOKEN:
 if not ADMIN_GROUP_ID_RAW:
     raise ValueError("Missing ADMIN_GROUP_ID environment variable.")
 
-if not VIP_LINK:
-    raise ValueError("Missing VIP_LINK environment variable.")
+if not WXC_CHANNEL_ID:
+    raise ValueError("Missing WXC_CHANNEL_ID environment variable.")
 
 if not GOOGLE_SHEET_ID:
     raise ValueError("Missing GOOGLE_SHEET_ID environment variable.")
@@ -498,7 +498,19 @@ PENDING_MESSAGE = (
 
 
 def approved_welcome_message():
-    return (
+    """Build the welcome message with a fresh, one-member invite link."""
+    try:
+        invite = bot.create_chat_invite_link(
+            chat_id=WXC_CHANNEL_ID,
+            member_limit=1,
+            expire_date=int(time.time()) + (24 * 60 * 60)
+        )
+        invite_link = invite.invite_link
+    except Exception:
+        logging.exception("Could not create a single-use WXC channel invite link.")
+        invite_link = None
+
+    message = (
         "🎉 <b>Welcome to the Exclusive WXC Channel!</b> 🏆\n\n"
         "Congratulations! Your verification is complete, "
         "and you're now ready to join the WXC community! 🚀\n\n"
@@ -513,9 +525,18 @@ def approved_welcome_message():
         "Don't miss upcoming events and community activities!\n\n"
         "👇 <b>Click the link below to join your "
         "Exclusive WXC Channel:</b>\n\n"
-        f"🔗 {html.escape(VIP_LINK)}\n\n"
-        "💚 Welcome aboard! 🚀"
     )
+
+    if invite_link:
+        message += f"🔗 {html.escape(invite_link)}\n\n"
+    else:
+        message += (
+            "⚠️ Your invite link could not be generated right now. "
+            "Please contact the Admin team for assistance.\n\n"
+        )
+
+    message += "💚 Welcome aboard! 🚀"
+    return message
 
 
 def registration_instructions():
